@@ -19,18 +19,21 @@ package cmd
 import (
 	"encoding/hex"
 	"fmt"
-	"github.com/buxtronix/phev2mqtt/client"
-	"github.com/buxtronix/phev2mqtt/protocol"
-	"github.com/spf13/cobra"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/buxtronix/phev2mqtt/client"
+	"github.com/buxtronix/phev2mqtt/protocol"
+	"github.com/spf13/cobra"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	log "github.com/sirupsen/logrus"
 )
 
 const defaultWifiRestartCmd = "sudo ip link set wlan0 down && sleep 3 && sudo ip link set wlan0 up"
+const defaultWifiEnableCmd = "sudo ip link set wlan0 up"
+const defaultWifiDisableCmd = "sudo ip link set wlan0 down"
 
 // mqttCmd represents the mqtt command
 var mqttCmd = &cobra.Command{
@@ -117,6 +120,25 @@ func restartWifi(cmd *cobra.Command) error {
 	return err
 }
 
+func enableWifi() error {
+	log.Infof("Attempting to enable wifi")
+
+	enableCmd := exec.Command("sh", "-c", defaultWifiEnableCmd)
+
+	stdoutStderr, err := enableCmd.CombinedOutput()
+	log.Infof("Output from wifi enable: %s", stdoutStderr)
+	return err
+}
+func disableWifi() error {
+	log.Infof("Attempting to disable wifi")
+
+	disableCmd := exec.Command("sh", "-c", defaultWifiDisableCmd)
+
+	stdoutStderr, err := disableCmd.CombinedOutput()
+	log.Infof("Output from wifi disable: %s", stdoutStderr)
+	return err
+}
+
 type mqttClient struct {
 	client         mqtt.Client
 	options        *mqtt.ClientOptions
@@ -142,7 +164,7 @@ func (m *mqttClient) topic(topic string) string {
 func (m *mqttClient) Run(cmd *cobra.Command, args []string) error {
 	var err error
 
-	m.enabled = true  // Default.
+	m.enabled = true // Default.
 	mqttServer, _ := cmd.Flags().GetString("mqtt_server")
 	mqttUsername, _ := cmd.Flags().GetString("mqtt_username")
 	mqttPassword, _ := cmd.Flags().GetString("mqtt_password")
@@ -237,10 +259,12 @@ func (m *mqttClient) handleIncomingMqtt(client mqtt.Client, msg mqtt.Message) {
 		payload := strings.ToLower(string(msg.Payload()))
 		switch payload {
 		case "off":
+			disableWifi()
 			m.enabled = false
 			m.phev.Close()
 			m.publish("/available", "offline")
 		case "on":
+			enableWifi()
 			m.enabled = true
 		case "restart":
 			m.enabled = true
