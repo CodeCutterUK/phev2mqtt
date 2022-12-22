@@ -34,6 +34,8 @@ import (
 const defaultWifiRestartCmd = "sudo ip link set wlan0 down && sleep 3 && sudo ip link set wlan0 up"
 const defaultWifiEnableCmd = "sudo ip link set wlan0 up"
 const defaultWifiDisableCmd = "sudo ip link set wlan0 down"
+const carBatterySizeKWh = 13.8
+const carChargeRateKWh = 2.5
 
 // mqttCmd represents the mqtt command
 var mqttCmd = &cobra.Command{
@@ -441,7 +443,12 @@ func (m *mqttClient) publishRegister(msg *protocol.PhevMessage) {
 		m.publish("/door/boot", boolOpen[reg.Boot])
 		m.publish("/lights/head", boolOnOff[reg.Headlights])
 	case *protocol.RegisterBatteryLevel:
+		remainingChargeKWh := (float64(reg.Level) / 100 * carBatterySizeKWh)
+		projectedTimeToFullCharge := (carBatterySizeKWh - remainingChargeKWh) / carChargeRateKWh / 10 * 60
 		m.publish("/battery/level", fmt.Sprintf("%d", reg.Level))
+		m.publish("/battery/level_kwh", fmt.Sprintf("%f", remainingChargeKWh))
+		m.publish("/charge/time_to_full", fmt.Sprintf("%f", projectedTimeToFullCharge))
+
 		m.publish("/lights/parking", boolOnOff[reg.ParkingLights])
 	case *protocol.RegisterChargePlug:
 		if reg.Connected {
