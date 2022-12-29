@@ -147,8 +147,9 @@ type mqttClient struct {
 	mqttData       map[string]string
 	updateInterval time.Duration
 
-	phev        *client.Client
-	lastConnect time.Time
+	phev             *client.Client
+	lastConnect      time.Time
+	sessionStartTime time.Time
 
 	prefix string
 
@@ -182,6 +183,10 @@ func (m *mqttClient) Run(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	connectionPollPeriod, err := time.ParseDuration("30m")
+	if err != nil {
+		return err
+	}
 
 	m.options = mqtt.NewClientOptions().
 		AddBroker(mqttServer).
@@ -212,7 +217,7 @@ func (m *mqttClient) Run(cmd *cobra.Command, args []string) error {
 				log.Error(err)
 			}
 			// Publish as offline if last connection was >30s ago.
-			if time.Now().Sub(m.lastConnect) > 30*time.Second {
+			if time.Now().Sub(m.lastConnect) > 10*time.Second {
 				m.publish("/available", "offline")
 			}
 			// Restart Wifi interface if > wifi_restart_time.
@@ -221,6 +226,14 @@ func (m *mqttClient) Run(cmd *cobra.Command, args []string) error {
 					log.Errorf("Error restarting wifi: %v", err)
 				}
 			}
+		}
+
+		if connectionPollPeriod > 0 && time.Now().Sub(m.lastConnect) > connectionPollPeriod {
+			log.Infof("Last connection too long ago")
+			if err := enableWifi(); err != nil {
+				log.Errorf("Error disabling wifi: %v", err)
+			}
+			m.enabled = true
 		}
 
 		time.Sleep(time.Second)
@@ -350,17 +363,43 @@ func (m *mqttClient) handlePhev(cmd *cobra.Command) error {
 	if err := m.phev.Start(); err != nil {
 		return err
 	}
-	m.publish("/available", "online")
 	m.client.Publish(m.topic("/available"), 2, true, "online")
+
+	uodateTime := time.Now().Format(time.RFC822)
+	m.publish("/last-connection-time", uodateTime)
+	m.client.Publish(m.topic("/last-connection-time"), 2, true, uodateTime)
+
 	defer func() {
 		m.lastConnect = time.Now()
 	}()
+	m.sessionStartTime = time.Now()
 
 	var encodingErrorCount = 0
 	var lastEncodingError time.Time
 
+	maxSessionTime, err := time.ParseDuration("1m")
+	if err != nil {
+		return err
+	}
+
 	updaterTicker := time.NewTicker(m.updateInterval)
+	m.phev.SetRegister(0x6, []byte{0x3})
 	for {
+
+		if time.Now().Sub(m.sessionStartTime) > maxSessionTime {
+			log.Infof("Session timeout")
+			if err := disableWifi(); err != nil {
+				log.Errorf("Error disabling wifi: %v", err)
+			}
+			m.phev.Close()
+			updaterTicker.Stop()
+
+			m.publish("/connection", "off")
+			m.client.Publish(m.topic("/connection"), 2, true, "off")
+			m.enabled = false
+			return nil
+		}
+
 		select {
 		case <-updaterTicker.C:
 			m.phev.SetRegister(0x6, []byte{0x3})
@@ -443,13 +482,16 @@ func (m *mqttClient) publishRegister(msg *protocol.PhevMessage) {
 		m.publish("/door/boot", boolOpen[reg.Boot])
 		m.publish("/lights/head", boolOnOff[reg.Headlights])
 	case *protocol.RegisterBatteryLevel:
+		m.publish("/lights/parking", boolOnOff[reg.ParkingLights])
+		if reg.Level < 6 || reg.Level == 255 {
+			break
+		}
 		remainingChargeKWh := (float64(reg.Level) / 100 * carBatterySizeKWh)
-		projectedTimeToFullCharge := (carBatterySizeKWh - remainingChargeKWh) / carChargeRateKWh / 10 * 60
+		projectedTimeToFullCharge := ((carBatterySizeKWh - remainingChargeKWh) / carChargeRateKWh) * 60
 		m.publish("/battery/level", fmt.Sprintf("%d", reg.Level))
 		m.publish("/battery/level_kwh", fmt.Sprintf("%f", remainingChargeKWh))
 		m.publish("/charge/time_to_full", fmt.Sprintf("%f", projectedTimeToFullCharge))
 
-		m.publish("/lights/parking", boolOnOff[reg.ParkingLights])
 	case *protocol.RegisterChargePlug:
 		if reg.Connected {
 			m.publish("/charge/plug", "connected")
@@ -796,7 +838,7 @@ func init() {
 	mqttCmd.Flags().String("mqtt_topic_prefix", "phev", "Prefix for MQTT topics")
 	mqttCmd.Flags().Bool("ha_discovery", true, "Enable Home Assistant MQTT discovery")
 	mqttCmd.Flags().String("ha_discovery_prefix", "homeassistant", "Prefix for Home Assistant MQTT discovery")
-	mqttCmd.Flags().Duration("update_interval", 5*time.Minute, "How often to request force updates")
+	mqttCmd.Flags().Duration("update_interval", 30*time.Second, "How often to request force updates")
 	mqttCmd.Flags().Duration("wifi_restart_time", 0, "Attempt to restart Wifi if no connection for this long")
 	mqttCmd.Flags().Duration("wifi_restart_retry_time", 2*time.Minute, "Interval to attempt Wifi restart")
 	mqttCmd.Flags().String("wifi_restart_command", defaultWifiRestartCmd, "Command to restart Wifi connection to Phev")
